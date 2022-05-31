@@ -10,7 +10,6 @@ class TFRWriter:
     def __init__(self):
         self.main_dir = "sRGB2XYZ"
         self.save_path = os.path.join(self.main_dir, "shards")
-        self.resize_shape = (256, 256)
         self.transform = A.Compose(
             [
                 A.Flip(),
@@ -35,12 +34,10 @@ class TFRWriter:
             features=tf.train.Features(feature=feature))
         return example_proto.SerializeToString()
 
-
     def get_image(self, sample_path):
         image = cv2.imread(sample_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, self.resize_shape)
-        return image
+        return image / 255.
 
     def get_samples(self, train_set):
         path = f"{self.main_dir}/sRGB_{train_set}/*.JPG"
@@ -49,15 +46,18 @@ class TFRWriter:
     def get_sample_data(self, sample):
         xyz_filename = sample.replace("sRGB_", "XYZ_").replace(".JPG", ".png")
         assert os.path.exists(xyz_filename), f"{xyz_filename} file does not exist."
+        
+        transformed = self.transform(
+            image=self.get_image(sample), 
+            XYZ_image=self.get_image(xyz_filename))        
 
-        srgb_image = self.get_image(sample)
-        xyz_image = self.get_image(xyz_filename)
-        transformed = self.transform(image=srgb_image, XYZ_image=xyz_image)
+        srgb_image = tf.cast(transformed['image'], dtype=tf.float32)
+        xyz_image = tf.cast(transformed['XYZ_image'], dtype=tf.float32)
         filename = os.path.basename(sample)
                 
         return [
-            tf.io.serialize_tensor(transformed['XYZ_image'], name="XYZ_image"),
-            tf.io.serialize_tensor(transformed['image'], name="sRGB_image"),
+            tf.io.serialize_tensor(xyz_image, name="XYZ_image"),
+            tf.io.serialize_tensor(srgb_image, name="sRGB_image"),
             tf.io.serialize_tensor(filename, name="filename")]
 
     def write(self):
@@ -70,9 +70,11 @@ class TFRWriter:
                     f.write(self.serialize_example(sample_data))
 
 class DataLoader:
-    def __init__(self, batch_size=8):
+    def __init__(self, train_set, batch_size=8):
+        self.train_set = train_set
         self.batch_size = batch_size
         self.buffer_size = 64
+        self.data = self.get_dataset()
 
     def read_tfrecord(self, example):
         feature_description = {
@@ -80,14 +82,15 @@ class DataLoader:
             'sRGB_image': tf.io.FixedLenFeature([], tf.string),
             'filename': tf.io.FixedLenFeature([], tf.string)}
         
-        example = tf.io.parse_single_example(example, feature_description)
+        example = tf.io.parse_single_example(example, feature_description)  
 
         for key in example:
             if key != 'filename':
-                example[key] = tf.io.parse_tensor(example[key], out_type=tf.uint8)
+                example[key] = tf.io.parse_tensor(example[key], out_type=tf.float32)
                 example[key] = tf.cast(example[key], dtype=tf.float32)
             else:
                 example[key] = tf.io.parse_tensor(example[key], out_type=tf.string)
+
         return example
     
     def load_dataset(self, files):
@@ -98,9 +101,12 @@ class DataLoader:
         dataset = dataset.map(self.read_tfrecord, num_parallel_calls=tf.data.AUTOTUNE)
         return dataset
 
-    def get_dataset(self, train_set):
-        dataset = self.load_dataset(f"sRGB2XYZ/shards/{train_set}.tfrec")
+    def get_dataset(self):
+        dataset = self.load_dataset(f"sRGB2XYZ/shards/{self.train_set}.tfrec")
         dataset = dataset.shuffle(self.buffer_size)
         dataset = dataset.batch(self.batch_size)
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
         return dataset
+
+    def __len__(self):
+        return len(glob.glob(f"sRGB2XYZ/sRGB_{self.train_set}/*")) // self.batch_size

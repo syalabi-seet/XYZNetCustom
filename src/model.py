@@ -4,6 +4,22 @@ from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import (
     Conv2D, MaxPool2D, LeakyReLU, Flatten, Dense, Dropout, Resizing, Rescaling)
 
+from tensorflow.keras.losses import Loss
+from tensorflow.keras.metrics import Metric
+
+class CompiledMAELoss(Loss):
+    def __init__(self, weight=1.5):
+        super(CompiledMAELoss, self).__init__()
+        self.weight = weight
+
+    def call(self, y_true, y_pred):
+        xyz_true, srgb_true = y_true
+        xyz_pred, srgb_pred = y_pred
+        xyz_loss = tf.abs(xyz_true - xyz_pred)
+        srgb_loss = tf.abs(srgb_true - srgb_pred)
+        total_loss = srgb_loss + (self.weight * xyz_loss)
+        return total_loss
+
 class CIEXYZNet(Model):
     def __init__(
             self, local_depth, local_convdepth, global_depth, 
@@ -74,8 +90,8 @@ class CIEXYZNet(Model):
         return x
 
     def transform(self, x):
-        x = tf.reshape(x, (-1, 3))
-        x = tf.concat([x, tf.math.multiply(x, x)], axis=1)
+        x = tf.reshape(x, (-1, 3)) # (65536, 3)
+        x = tf.concat([x, tf.math.multiply(x, x)], axis=1) # (65536, 6)
         return x
 
     def forward_global(self, x, target):
@@ -86,12 +102,12 @@ class CIEXYZNet(Model):
         else:
             raise Exception("Wrong target")
 
-        m = tf.reshape(m_v, (x.shape[0], 6, 3)) # (8, 6, 3)
+        m_v = tf.reshape(m_v, (x.shape[0], 6, 3)) # (8, 6, 3)
 
         y = []
-        for i in range(m.shape[0]):
+        for i in range(m_v.shape[0]):
             t1 = self.transform(x[i]) # (65536, 6)
-            t2 = m[i] # (6, 3)
+            t2 = m_v[i] # (6, 3)
             t = tf.matmul(t1, t2) # (65536, 3)
             t =  tf.reshape(t, x.shape[1:]) # (256, 256, 3)
             y.append(t)            
