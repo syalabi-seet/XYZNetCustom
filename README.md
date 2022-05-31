@@ -1,4 +1,5 @@
-# Custom XYZNet
+# XYZNet-TF
+Implementation of CIEXYZNet using Tensorflow 2.0
 
 ## Docker setup
 ### Create docker image and container
