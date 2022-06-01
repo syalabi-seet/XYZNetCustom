@@ -22,11 +22,12 @@ class CompiledMAELoss(Loss):
 
 class CIEXYZNet(Model):
     def __init__(
-            self, local_depth, local_convdepth, global_depth, 
+            self, local_depth, local_convdepth, local_imagesize, global_depth, 
             global_convdepth, global_imagesize, scale):
         super(CIEXYZNet, self).__init__()
         self.local_depth = local_depth
         self.local_convdepth = local_convdepth
+        self.local_imagesize = local_imagesize
         self.global_depth = global_depth
         self.global_convdepth = global_convdepth
         self.global_imagesize = global_imagesize
@@ -102,14 +103,14 @@ class CIEXYZNet(Model):
         else:
             raise Exception("Wrong target")
 
-        m_v = tf.reshape(m_v, (x.shape[0], 6, 3)) # (8, 6, 3)
+        m_v = tf.reshape(m_v, (-1, 6, 3)) # (8, 6, 3)
 
         y = []
-        for i in range(m_v.shape[0]):
+        for i in range(len(m_v)):
             t1 = self.transform(x[i]) # (65536, 6)
             t2 = m_v[i] # (6, 3)
             t = tf.matmul(t1, t2) # (65536, 3)
-            t =  tf.reshape(t, x.shape[1:]) # (256, 256, 3)
+            t =  tf.reshape(t, tf.shape(x)[1:]) # (256, 256, 3)
             y.append(t)            
         return tf.stack(y, axis=0)
     

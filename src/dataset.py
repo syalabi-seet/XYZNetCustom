@@ -70,7 +70,7 @@ class TFRWriter:
                     f.write(self.serialize_example(sample_data))
 
 class DataLoader:
-    def __init__(self, train_set, batch_size=8):
+    def __init__(self, train_set, batch_size=4):
         self.train_set = train_set
         self.batch_size = batch_size
         self.buffer_size = 64
