@@ -1,22 +1,18 @@
 import os
 import glob
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 import cv2
 import albumentations as A
+from sklearn.model_selection import KFold
 
 import tensorflow as tf
 
 class TFRWriter:
-    def __init__(self):
+    def __init__(self, image_size=256):
         self.main_dir = "sRGB2XYZ"
         self.save_path = os.path.join(self.main_dir, "shards")
-        self.transform = A.Compose(
-            [
-                A.Flip(),
-                A.RandomCrop(256, 256)
-            ],
-            additional_targets={'XYZ_image': 'image'}
-        )
+        self.n_splits = 10
+        self.image_size = image_size
 
     def _bytes_feature(self, value):
         """Returns a bytes_list from a string / byte."""
@@ -46,34 +42,66 @@ class TFRWriter:
     def get_sample_data(self, sample):
         xyz_filename = sample.replace("sRGB_", "XYZ_").replace(".JPG", ".png")
         assert os.path.exists(xyz_filename), f"{xyz_filename} file does not exist."
+
+        filename = os.path.basename(sample)
+
+        transform = A.Compose(
+            [
+                A.Flip(),
+                A.Resize(self.image_size, self.image_size)
+            ],
+            additional_targets={'XYZ_image': 'image'}) 
         
-        transformed = self.transform(
+        transformed = transform(
             image=self.get_image(sample), 
             XYZ_image=self.get_image(xyz_filename))        
 
         srgb_image = tf.cast(transformed['image'], dtype=tf.float32)
         xyz_image = tf.cast(transformed['XYZ_image'], dtype=tf.float32)
-        filename = os.path.basename(sample)
                 
         return [
             tf.io.serialize_tensor(xyz_image, name="XYZ_image"),
             tf.io.serialize_tensor(srgb_image, name="sRGB_image"),
             tf.io.serialize_tensor(filename, name="filename")]
+    
+    def get_shard_data(self, samples):
+        kf = KFold(n_splits=self.n_splits, shuffle=True, random_state=42)
+
+        split_list = []
+        for _, val in kf.split(samples):
+            splits = []
+            for i in val:
+                splits.append(samples[i])
+            split_list.append(splits)
+        return split_list
 
     def write(self):
-        for train_set in ["training", "validation", "testing"]:
-            shard_path = os.path.join(self.save_path, f"{train_set}.tfrec")
-            samples = self.get_samples(train_set)
-            with tf.io.TFRecordWriter(shard_path) as f:
-                for sample in tqdm(samples, total=len(samples), desc=f"{train_set}"):
-                    sample_data = self.get_sample_data(sample)
-                    f.write(self.serialize_example(sample_data))
+        sets = ["testing", "validation", "training"]
+        for train_set in sets:
+            all_samples = self.get_samples(train_set)
+
+            if train_set != "training":
+                shard_path = os.path.join(self.save_path, f"{train_set}.tfrec")
+                with tf.io.TFRecordWriter(shard_path) as f:
+                    for sample in tqdm(all_samples, total=len(all_samples), desc=f"{train_set}"):
+                        sample_data = self.get_sample_data(sample)
+                        f.write(self.serialize_example(sample_data))
+            else:
+                shards = self.get_shard_data(all_samples)
+                for shard, samples in tqdm(enumerate(shards), total=self.n_splits, desc=f"{train_set}"):
+                    shard_path = os.path.join(self.save_path, f"{train_set}_{shard}.tfrec")
+                    with tf.io.TFRecordWriter(shard_path) as f:
+                        for sample in samples:
+                            sample_data = self.get_sample_data(sample)
+                            f.write(self.serialize_example(sample_data))
+
 
 class DataLoader:
     def __init__(self, train_set, batch_size=4):
         self.train_set = train_set
         self.batch_size = batch_size
         self.buffer_size = 64
+        self.files = glob.glob(f"sRGB2XYZ/shards/{self.train_set}*.tfrec")
         self.data = self.get_dataset()
 
     def read_tfrecord(self, example):
@@ -90,7 +118,7 @@ class DataLoader:
                 example[key] = tf.cast(example[key], dtype=tf.float32)
             else:
                 example[key] = tf.io.parse_tensor(example[key], out_type=tf.string)
-
+        
         return example
     
     def load_dataset(self, files):
@@ -102,7 +130,7 @@ class DataLoader:
         return dataset
 
     def get_dataset(self):
-        dataset = self.load_dataset(f"sRGB2XYZ/shards/{self.train_set}.tfrec")
+        dataset = self.load_dataset(self.files)
         dataset = dataset.shuffle(self.buffer_size)
         dataset = dataset.batch(self.batch_size)
         dataset = dataset.prefetch(tf.data.AUTOTUNE)

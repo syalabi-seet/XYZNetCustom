@@ -1,24 +1,67 @@
+import matplotlib.pyplot as plt
+
 import tensorflow as tf
 
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import (
     Conv2D, MaxPool2D, LeakyReLU, Flatten, Dense, Dropout, Resizing, Rescaling)
 
-from tensorflow.keras.losses import Loss
-from tensorflow.keras.metrics import Metric
+from tensorflow.keras.losses import Loss, MeanAbsoluteError
+from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 class CompiledMAELoss(Loss):
     def __init__(self, weight=1.5):
         super(CompiledMAELoss, self).__init__()
         self.weight = weight
+        self.xyz_mae = MeanAbsoluteError()
+        self.srgb_mae = MeanAbsoluteError()
 
     def call(self, y_true, y_pred):
-        xyz_true, srgb_true = y_true
-        xyz_pred, srgb_pred = y_pred
-        xyz_loss = tf.abs(xyz_true - xyz_pred)
-        srgb_loss = tf.abs(srgb_true - srgb_pred)
+        xyz_loss = self.xyz_mae(y_true[0], y_pred[0])
+        srgb_loss = self.srgb_mae(y_true[1], y_pred[1])
         total_loss = srgb_loss + (self.weight * xyz_loss)
         return total_loss
+
+class CosineDecayWithWarmup(LearningRateSchedule):
+    def __init__(
+            self, 
+            epochs,
+            lr_max,
+            lr_min,
+            warmup_epochs=0, 
+            sustain_epochs=0,            
+            lr_start=1e-5,             
+            n_cycles=0.5):
+        self.warmup_epochs = warmup_epochs
+        self.sustain_epochs = sustain_epochs
+        self.epochs = epochs
+        self.lr_start = lr_start
+        self.lr_max = lr_max
+        self.lr_min = lr_min
+        self.n_cycles = n_cycles
+
+    def __call__(self, epoch):  
+        if epoch < self.warmup_epochs:
+            lr = ((self.lr_max - self.lr_start) / self.warmup_epochs) * epoch + self.lr_start
+        elif epoch <= (self.warmup_epochs + self.sustain_epochs):
+            lr = self.lr_max
+        else:
+            progress = (
+                (epoch - self.warmup_epochs - self.sustain_epochs) / 
+                (self.epochs - self.warmup_epochs - self.sustain_epochs))
+            lr = (self.lr_max-self.lr_min) * (0.5 * (1.0 + tf.math.cos((22/7) * 
+                self.n_cycles * 2.0 * progress)))
+            if self.lr_min is not None:
+                lr = tf.math.maximum(self.lr_min, lr)
+        return lr
+
+    def plot(self):
+        epochs = range(self.epochs+1)
+        lr = [self(epoch) for epoch in epochs]
+        plt.plot(epochs, lr)
+        plt.xlabel("learning_rate")
+        plt.ylabel("epochs")
+        plt.show()
 
 class CIEXYZNet(Model):
     def __init__(
@@ -31,6 +74,8 @@ class CIEXYZNet(Model):
         self.global_depth = global_depth
         self.global_convdepth = global_convdepth
         self.global_imagesize = global_imagesize
+        self.global_output = 18
+        self.activation = LeakyReLU()
         self.scale = scale
 
         self.conv_params = {
@@ -52,7 +97,7 @@ class CIEXYZNet(Model):
             local_subnet.add(Conv2D(
                 **self.conv_params,
                 filters=self.local_convdepth if i != self.local_depth - 1 else 3,
-                activation=LeakyReLU() if i != self.local_depth - 1 else "tanh",
+                activation=self.activation if i != self.local_depth - 1 else "tanh",
                 name=f"conv_{i}"))
 
         local_subnet.add(Rescaling(self.scale))
@@ -70,7 +115,7 @@ class CIEXYZNet(Model):
             global_subnet.add(Conv2D(
                 **self.conv_params, 
                 filters=self.global_convdepth,
-                activation=LeakyReLU(), 
+                activation=self.activation, 
                 name=f"conv_{i}"))
             global_subnet.add(MaxPool2D(
                 pool_size=2, strides=2, padding="valid", name=f"maxpool_{i}"))
@@ -78,7 +123,7 @@ class CIEXYZNet(Model):
         global_subnet.add(Flatten(name="flatten_0"))
         global_subnet.add(Dense(1024, name="dense_0"))
         global_subnet.add(Dropout(0.5, name="dropout_0"))
-        global_subnet.add(Dense(18, name="dense_1"))
+        global_subnet.add(Dense(self.global_output, name="dense_1"))
         return global_subnet    
 
     def forward_local(self, x, target):
@@ -91,26 +136,26 @@ class CIEXYZNet(Model):
         return x
 
     def transform(self, x):
-        x = tf.reshape(x, (-1, 3)) # (65536, 3)
-        x = tf.concat([x, tf.math.multiply(x, x)], axis=1) # (65536, 6)
+        x = tf.reshape(x, (-1, 3))
+        x = tf.concat([x, tf.math.multiply(x, x)], axis=1)
         return x
 
     def forward_global(self, x, target):
         if target == "xyz":
-            m_v = self.srgb2xyz_globalnet(x) # (8, 18)
+            m_v = self.srgb2xyz_globalnet(x)
         elif target == "srgb":
-            m_v = self.xyz2srgb_globalnet(x) # (8, 18)
+            m_v = self.xyz2srgb_globalnet(x)
         else:
             raise Exception("Wrong target")
 
-        m_v = tf.reshape(m_v, (-1, 6, 3)) # (8, 6, 3)
+        m_v = tf.reshape(m_v, (-1, self.global_output // 3, 3))
 
         y = []
         for i in range(len(m_v)):
-            t1 = self.transform(x[i]) # (65536, 6)
-            t2 = m_v[i] # (6, 3)
-            t = tf.matmul(t1, t2) # (65536, 3)
-            t =  tf.reshape(t, tf.shape(x)[1:]) # (256, 256, 3)
+            t1 = self.transform(x[i])
+            t2 = m_v[i]
+            t = tf.matmul(t1, t2)
+            t =  tf.reshape(t, tf.shape(x)[1:])
             y.append(t)            
         return tf.stack(y, axis=0)
     
