@@ -6,21 +6,7 @@ from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import (
     Conv2D, MaxPool2D, LeakyReLU, Flatten, Dense, Dropout, Resizing, Rescaling)
 
-from tensorflow.keras.losses import Loss, MeanAbsoluteError
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
-
-class CompiledMAELoss(Loss):
-    def __init__(self, weight=1.5):
-        super(CompiledMAELoss, self).__init__()
-        self.weight = weight
-        self.xyz_mae = MeanAbsoluteError()
-        self.srgb_mae = MeanAbsoluteError()
-
-    def call(self, y_true, y_pred):
-        xyz_loss = self.xyz_mae(y_true[0], y_pred[0])
-        srgb_loss = self.srgb_mae(y_true[1], y_pred[1])
-        total_loss = srgb_loss + (self.weight * xyz_loss)
-        return total_loss
 
 class CosineDecayWithWarmup(LearningRateSchedule):
     def __init__(
@@ -124,7 +110,7 @@ class CIEXYZNet(Model):
         global_subnet.add(Dense(1024, name="dense_0"))
         global_subnet.add(Dropout(0.5, name="dropout_0"))
         global_subnet.add(Dense(self.global_output, name="dense_1"))
-        return global_subnet    
+        return global_subnet           
 
     def forward_local(self, x, target):
         if target == "xyz":
@@ -155,19 +141,17 @@ class CIEXYZNet(Model):
             t1 = self.transform(x[i])
             t2 = m_v[i]
             t = tf.matmul(t1, t2)
-            t =  tf.reshape(t, tf.shape(x)[1:])
+            t = tf.reshape(t, tf.shape(x)[1:])
             y.append(t)            
-        return tf.stack(y, axis=0)
-    
-    def forward_srgb2xyz(self, srgb):
-        l_xyz = srgb - self.forward_local(srgb, target='xyz')
-        return self.forward_global(l_xyz, target='xyz')
-
-    def forward_xyz2srgb(self, xyz):
-        g_srgb = self.forward_global(xyz, target='srgb')
-        return g_srgb + self.forward_local(g_srgb, target='srgb')
+        y = tf.stack(y, axis=0)
+        return y
 
     def call(self, x):
-        xyz = self.forward_srgb2xyz(x)
-        srgb = self.forward_xyz2srgb(xyz)
+        # Encoder
+        l_xyz = x - self.forward_local(x, target='xyz')
+        xyz = self.forward_global(l_xyz, target='xyz')
+
+        # Decoder
+        g_srgb = self.forward_global(xyz, target='srgb')
+        srgb = g_srgb + self.forward_local(g_srgb, target='srgb')
         return xyz, srgb

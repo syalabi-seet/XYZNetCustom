@@ -10,7 +10,7 @@ import tensorflow as tf
 class TFRWriter:
     def __init__(self, image_size=256):
         self.main_dir = "sRGB2XYZ"
-        self.save_path = os.path.join(self.main_dir, "shards")
+        self.save_path = os.path.join(self.main_dir, f"shards_{image_size}")
         self.n_splits = 10
         self.image_size = image_size
 
@@ -31,7 +31,7 @@ class TFRWriter:
         return example_proto.SerializeToString()
 
     def get_image(self, sample_path):
-        image = cv2.imread(sample_path)
+        image = cv2.imread(sample_path)        
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         return image / 255.
 
@@ -39,18 +39,26 @@ class TFRWriter:
         path = f"{self.main_dir}/sRGB_{train_set}/*.JPG"
         return glob.glob(path)
 
-    def get_sample_data(self, sample):
+    def get_sample_data(self, sample, train_set):
         xyz_filename = sample.replace("sRGB_", "XYZ_").replace(".JPG", ".png")
         assert os.path.exists(xyz_filename), f"{xyz_filename} file does not exist."
 
         filename = os.path.basename(sample)
 
-        transform = A.Compose(
-            [
-                A.Flip(),
-                A.Resize(self.image_size, self.image_size)
-            ],
-            additional_targets={'XYZ_image': 'image'}) 
+        if train_set != "training":
+            transform = A.Compose(
+                [
+                    A.Flip(),
+                    A.Resize(self.image_size, self.image_size)
+                ],
+                additional_targets={'XYZ_image': 'image'})         
+        else:
+            transform = A.Compose(
+                [
+                    A.Flip(),
+                    A.Resize(self.image_size, self.image_size)
+                ],
+                additional_targets={'XYZ_image': 'image'}) 
         
         transformed = transform(
             image=self.get_image(sample), 
@@ -84,7 +92,7 @@ class TFRWriter:
                 shard_path = os.path.join(self.save_path, f"{train_set}.tfrec")
                 with tf.io.TFRecordWriter(shard_path) as f:
                     for sample in tqdm(all_samples, total=len(all_samples), desc=f"{train_set}"):
-                        sample_data = self.get_sample_data(sample)
+                        sample_data = self.get_sample_data(sample, train_set)
                         f.write(self.serialize_example(sample_data))
             else:
                 shards = self.get_shard_data(all_samples)
@@ -92,16 +100,15 @@ class TFRWriter:
                     shard_path = os.path.join(self.save_path, f"{train_set}_{shard}.tfrec")
                     with tf.io.TFRecordWriter(shard_path) as f:
                         for sample in samples:
-                            sample_data = self.get_sample_data(sample)
+                            sample_data = self.get_sample_data(sample, train_set)
                             f.write(self.serialize_example(sample_data))
 
-
 class DataLoader:
-    def __init__(self, train_set, batch_size=4):
+    def __init__(self, train_set, image_size, batch_size=4):
         self.train_set = train_set
         self.batch_size = batch_size
         self.buffer_size = 64
-        self.files = glob.glob(f"sRGB2XYZ/shards/{self.train_set}*.tfrec")
+        self.files = glob.glob(f"sRGB2XYZ/shards_{image_size}/{self.train_set}*.tfrec")
         self.data = self.get_dataset()
 
     def read_tfrecord(self, example):
