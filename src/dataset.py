@@ -56,7 +56,9 @@ class TFRWriter:
             transform = A.Compose(
                 [
                     A.Flip(),
-                    A.Resize(self.image_size, self.image_size)
+                    A.Resize(self.image_size, self.image_size),
+                    A.RandomGridShuffle(),
+                    A.CoarseDropout()
                 ],
                 additional_targets={'XYZ_image': 'image'}) 
         

@@ -2,7 +2,8 @@
 Implementation of CIEXYZNet using Tensorflow 2.0
 
 ```
-Model 1: 
+Model 1: No augmentation
+Model 2: Coarsedropout + RandomGridshuffle
 ```
 
 ## Docker setup
