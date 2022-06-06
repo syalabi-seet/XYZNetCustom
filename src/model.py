@@ -2,9 +2,9 @@ import matplotlib.pyplot as plt
 
 import tensorflow as tf
 
-from tensorflow.keras import Model, Sequential
+from tensorflow.keras import Model, Sequential, Input
 from tensorflow.keras.layers import (
-    Conv2D, MaxPool2D, LeakyReLU, Flatten, Dense, Dropout, Resizing, Rescaling)
+    Conv2D, MaxPool2D, LeakyReLU, Flatten, Dense, Dropout, Resizing, Rescaling, Concatenate)
 
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
@@ -61,56 +61,71 @@ class CIEXYZNet(Model):
         self.global_convdepth = global_convdepth
         self.global_imagesize = global_imagesize
         self.global_output = 18
-        self.activation = LeakyReLU()
         self.scale = scale
 
         self.conv_params = {
-            "kernel_size": 3,
             "strides": 1,
             "padding": "same",
             "kernel_initializer": "he_normal",
             "bias_initializer": "zeros"}        
 
-        self.srgb2xyz_localnet = self.get_localsubnet(name="sRGB2XYZ_localnet")
-        self.xyz2srgb_localnet = self.get_localsubnet(name="XYZ2sRGB_localnet")
-        self.srgb2xyz_globalnet = self.get_globalsubnet(name="sRGB2XYZ_globalnet")
-        self.xyz2srgb_globalnet = self.get_globalsubnet(name="XYZ2sRGB_globalnet")
+        self.srgb2xyz_localnet = self.get_localsubnet(
+            name="sRGB2XYZ_localnet", conv_depth=64, depth=self.local_depth)
+        self.srgb2xyz_globalnet = self.get_globalsubnet(
+            name="sRGB2XYZ_globalnet", 
+            kernel_size=5,
+            depth=6, conv_depth=64, 
+            image_size=self.local_imagesize,
+            output_nodes=2048,
+            dropout=0.7)
+        self.xyz2srgb_localnet = self.get_localsubnet(
+            name="XYZ2sRGB_localnet", conv_depth=self.local_convdepth, depth=self.local_depth)        
+        self.xyz2srgb_globalnet = self.get_globalsubnet(
+            name="XYZ2sRGB_globalnet", 
+            kernel_size=3,
+            depth=self.global_depth, 
+            conv_depth=self.global_convdepth, 
+            image_size=self.global_imagesize, 
+            output_nodes=512,
+            dropout=0.3)
 
-    def get_localsubnet(self, name):
+    def get_localsubnet(self, name, conv_depth, depth):
         local_subnet = Sequential(name=name)
                
-        for i in range(self.local_depth):
+        for i in range(depth):
             local_subnet.add(Conv2D(
                 **self.conv_params,
-                filters=self.local_convdepth if i != self.local_depth - 1 else 3,
-                activation=self.activation if i != self.local_depth - 1 else "tanh",
+                kernel_size=3,
+                filters=conv_depth if i != depth - 1 else 3,
+                activation=LeakyReLU() if i != depth - 1 else "tanh",
                 name=f"conv_{i}"))
 
         local_subnet.add(Rescaling(self.scale))
         return local_subnet
 
-    def get_globalsubnet(self, name):
+    def get_globalsubnet(self, name, kernel_size, depth, conv_depth, image_size, output_nodes, dropout):
         global_subnet = Sequential(name=name)
 
         global_subnet.add(Resizing(
-            height=self.global_imagesize, 
-            width=self.global_imagesize,
+            height=image_size, 
+            width=image_size,
             interpolation='bilinear'))
 
-        for i in range(self.global_depth):
+        for i in range(depth):
             global_subnet.add(Conv2D(
                 **self.conv_params, 
-                filters=self.global_convdepth,
-                activation=self.activation, 
+                kernel_size=kernel_size,
+                filters=conv_depth,
+                activation=LeakyReLU(), 
                 name=f"conv_{i}"))
             global_subnet.add(MaxPool2D(
                 pool_size=2, strides=2, padding="valid", name=f"maxpool_{i}"))
 
         global_subnet.add(Flatten(name="flatten_0"))
-        global_subnet.add(Dense(1024, name="dense_0"))
-        global_subnet.add(Dropout(0.5, name="dropout_0"))
+        global_subnet.add(Dense(output_nodes, name="dense_0"))
+        global_subnet.add(Dropout(dropout, name="dropout_0"))
         global_subnet.add(Dense(self.global_output, name="dense_1"))
-        return global_subnet           
+        return global_subnet     
 
     def forward_local(self, x, target):
         if target == "xyz":
@@ -123,7 +138,12 @@ class CIEXYZNet(Model):
 
     def transform(self, x):
         x = tf.reshape(x, (-1, 3))
-        x = tf.concat([x, tf.math.multiply(x, x)], axis=1)
+        x_ = tf.identity(x)
+        x_1 = []
+        for _ in range(self.global_output // 9):
+            x_ = tf.math.multiply(x, x_)
+            x_1.append(x_)
+        x = tf.concat(x_1, axis=1)
         return x
 
     def forward_global(self, x, target):
@@ -141,6 +161,7 @@ class CIEXYZNet(Model):
             t1 = self.transform(x[i])
             t2 = m_v[i]
             t = tf.matmul(t1, t2)
+            t = tf.clip_by_value(t, 0., 1.)
             t = tf.reshape(t, tf.shape(x)[1:])
             y.append(t)            
         y = tf.stack(y, axis=0)

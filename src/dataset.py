@@ -1,11 +1,14 @@
 import os
 import glob
+import numpy as np
 from tqdm.notebook import tqdm
 import cv2
 import albumentations as A
 from sklearn.model_selection import KFold
 
 import tensorflow as tf
+
+GAMMA = 2.19921875
 
 class TFRWriter:
     def __init__(self, image_size=256):
