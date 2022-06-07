@@ -63,7 +63,7 @@ class TFRWriter:
                     A.RandomGridShuffle(),
                     A.CoarseDropout()
                 ],
-                additional_targets={'XYZ_image': 'image'}) 
+                additional_targets={'XYZ_image': 'image'})
         
         transformed = transform(
             image=self.get_image(sample), 
